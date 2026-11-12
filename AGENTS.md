@@ -4,3 +4,4 @@
 - Config keys and defaults are in `odroid-hc4-display.conf`; see README for data sources.
 - Validate code changes with `cargo fmt --check`, `cargo test`, and `cargo build --release`.
 - Keep changes focused; no external crates are needed for the current I²C, sysfs, and command-based sources.
+- After changing rendering (font, scaling, scroll), regenerate the README preview: `cargo run --release -- --preview docs/preview.gif`.

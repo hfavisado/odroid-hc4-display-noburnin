@@ -5,6 +5,10 @@ addresses, thermal readings, and disk usage as a repeating, perspective-style
 credits roll: lines enter large from the bottom, shrink while moving upward,
 and return to the bottom after leaving the top to reduce static OLED content.
 
+![Animated preview of the scrolling OLED display](docs/preview.gif)
+
+*Preview rendered with sample data; each lit pixel is one OLED pixel.*
+
 ## Build and run
 
 The program has no Cargo dependencies and targets Linux. Build it on the HC4
@@ -22,6 +26,21 @@ are used if `/etc/odroid-hc4-display.conf` is absent. Use `--config PATH` to
 select another configuration. The process needs write access to the I²C device
 (by default `/dev/i2c-1`); enable the Linux `i2c-dev` interface and run it as
 root or grant the service account access to that device.
+
+## Preview without hardware
+
+`--preview` renders one full scroll loop to an animated GIF and exits, without
+touching the I²C device, so it works on any Linux/macOS machine with Rust:
+
+```sh
+cargo run --release -- --preview docs/preview.gif            # sample data
+cargo run --release -- --preview out.gif --live              # this machine's IPs, temps, disks
+cargo run --release -- --config my.conf --preview out.gif    # honours scroll_speed / refresh_ms
+```
+
+The GIF is written by a built-in encoder (no extra crates) and loops seamlessly.
+The one in this README is `docs/preview.gif`; regenerate it with the first
+command after changing the rendering code.
 
 ## Configuration
 

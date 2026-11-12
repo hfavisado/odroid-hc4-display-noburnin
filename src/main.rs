@@ -1,3 +1,4 @@
+use odroid_hc4_display_noburnin::preview::{render_gif, sample_lines};
 use odroid_hc4_display_noburnin::{
     Config, I2cDisplay, collect_lines, normalize_scroll_offset, render_frame,
 };
@@ -16,7 +17,8 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = config_argument()?;
+    let options = parse_arguments()?;
+    let config_path = options.config;
     let config = match Config::from_file(&config_path) {
         Ok(config) => config,
         Err(_) if config_path.to_str() == Some(CONFIG_PATH) && !config_path.exists() => {
@@ -24,6 +26,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(error) => return Err(error.into()),
     };
+    if let Some(output) = options.preview {
+        let lines = if options.live {
+            collect_lines(&config)
+        } else {
+            sample_lines()
+        };
+        std::fs::write(
+            &output,
+            render_gif(&lines, config.scroll_speed, config.refresh_ms),
+        )?;
+        println!("wrote preview to {}", output.display());
+        return Ok(());
+    }
     let mut display = I2cDisplay::new(&config.i2c_device, config.i2c_address)?;
     let mut last_frame = Instant::now();
     let mut last_data_refresh = Instant::now();
@@ -45,21 +60,41 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn config_argument() -> Result<PathBuf, String> {
+struct Options {
+    config: PathBuf,
+    preview: Option<PathBuf>,
+    live: bool,
+}
+
+fn parse_arguments() -> Result<Options, String> {
+    let mut options = Options {
+        config: PathBuf::from(CONFIG_PATH),
+        preview: None,
+        live: false,
+    };
     let mut arguments = std::env::args().skip(1);
-    match arguments.next().as_deref() {
-        None => Ok(PathBuf::from(CONFIG_PATH)),
-        Some("--config") => {
-            let path = arguments.next().ok_or("--config requires a path")?;
-            if arguments.next().is_some() {
-                return Err("unexpected extra argument".to_owned());
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--config" => {
+                options.config = arguments.next().ok_or("--config requires a path")?.into();
             }
-            Ok(PathBuf::from(path))
+            "--preview" => {
+                options.preview = Some(arguments.next().ok_or("--preview requires a path")?.into());
+            }
+            "--live" => options.live = true,
+            "--help" | "-h" => {
+                println!(
+                    "Usage: odroid-hc4-display [--config PATH] [--preview OUT.gif [--live]]\n\n\
+                     --preview  write an animated GIF of the display instead of using the OLED\n\
+                     --live     with --preview, use this machine's real data, not sample data"
+                );
+                std::process::exit(0);
+            }
+            other => return Err(format!("unknown argument {other}; use --help")),
         }
-        Some("--help" | "-h") => {
-            println!("Usage: odroid-hc4-display [--config PATH]");
-            std::process::exit(0);
-        }
-        Some(argument) => Err(format!("unknown argument {argument}; use --help")),
     }
+    if options.live && options.preview.is_none() {
+        return Err("--live requires --preview".to_owned());
+    }
+    Ok(options)
 }

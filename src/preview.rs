@@ -21,10 +21,11 @@ pub fn sample_lines() -> Vec<String> {
     .to_vec()
 }
 
-/// Shows up to eight pages of the animated sequence.
+/// Shows four to eight pages of the animated sequence.
 pub fn render_gif(lines: &[String], page_interval_ms: u64) -> Vec<u8> {
     const FRAME_MS: u64 = 100;
-    let pages = page_cycle_length(lines).min(8) as u64;
+    let cycle = page_cycle_length(lines);
+    let pages = if cycle == 0 { 0 } else { cycle.clamp(4, 8) } as u64;
 
     let (width, height) = (WIDTH * CELL, HEIGHT * CELL);
     let mut out = Vec::new();
@@ -38,6 +39,7 @@ pub fn render_gif(lines: &[String], page_interval_ms: u64) -> Vec<u8> {
     out.extend_from_slice(&[3, 1, 0, 0, 0]); // loop forever
 
     let mut animation = Animation::default();
+    let mut returning_to_start = false;
     loop {
         let bits = animation.render(lines, page_interval_ms);
         let mut pixels = vec![0u8; width * height];
@@ -66,7 +68,11 @@ pub fn render_gif(lines: &[String], page_interval_ms: u64) -> Vec<u8> {
             break;
         }
         animation.advance(FRAME_MS, lines, page_interval_ms);
-        if animation.page_index >= pages && animation.phase == Phase::Hold {
+        if !returning_to_start && animation.page_index >= pages {
+            animation.page_index = 0;
+            returning_to_start = true;
+        }
+        if returning_to_start && animation.phase == Phase::Hold {
             break;
         }
     }

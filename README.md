@@ -2,9 +2,11 @@
 
 A small Rust program for the ODROID-HC4's 128×32 I²C OLED. It displays IPv4
 addresses, thermal readings, and disk usage using a crisp 5×7 pixel font.
-Vertically centered pages alternate between three and two readings. Each page
-slides off to the left before the next slides in from the right. Long readings
-scroll horizontally while the page is held.
+Pages alternate between three and two readings, shifting vertically between
+visits to use the top and bottom margins. For an unchanged reading list, each
+recurring page visits all vertical positions where its text fits equally often
+over a complete cycle. Each page slides off to the left before the next slides
+in from the right. Long readings scroll horizontally while the page is held.
 
 ![Animated preview of the paged OLED display](docs/preview.gif)
 
@@ -30,7 +32,7 @@ root or grant the service account access to that device.
 
 ## Preview without hardware
 
-`--preview` renders up to eight pages of the animation to a GIF and exits,
+`--preview` renders four to eight pages of the animation to a GIF and exits,
 without touching the I²C device, so it works on any Linux/macOS machine with Rust:
 
 ```sh
@@ -39,10 +41,10 @@ cargo run --release -- --preview out.gif --live              # this machine's IP
 cargo run --release -- --config my.conf --preview out.gif    # honours page_interval_ms
 ```
 
-The GIF is written by a built-in encoder (no extra crates). Sequences longer
-than eight pages are shortened in the preview; the real display continues
-through the full sequence. The one in this README is `docs/preview.gif`;
-regenerate it with the first command after changing the rendering code.
+The GIF is written by a built-in encoder (no extra crates). It loops after a
+short sample of the sequence; the real display continues through all vertical
+positions. The one in this README is `docs/preview.gif`; regenerate it with the
+first command after changing the rendering code.
 
 ## Configuration
 
@@ -65,7 +67,7 @@ refresh_ms=100
 `network_interface` is optional; when unset, IPv4 addresses from all interfaces
 with a global address are shown. Each `disk` line adds a mount path to display; the
 default is `/`. Configure one line per mounted filesystem you want to monitor.
-`page_interval_ms` is the minimum time a page remains centered in milliseconds
+`page_interval_ms` is the minimum time a page remains stationary in milliseconds
 (1000–60000). A page with a long reading stays longer if needed to show the
 entire reading. `refresh_ms` is the display refresh interval in milliseconds
 (20–2000); the sleep between animation frames is capped at 100 ms.

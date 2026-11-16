@@ -321,6 +321,17 @@ fn text_width(text: &str) -> usize {
         .saturating_sub(1)
 }
 
+fn page_top(lines: &[String], page_index: u64, row_count: usize) -> usize {
+    let height = (row_count - 1) * LINE_ADVANCE + GLYPH_HEIGHT;
+    let positions = HEIGHT - height + 1;
+    let pages_per_cycle = (page_cycle_length(lines) / 2) as u64;
+    let page_pair = page_index / 2;
+    // Each recurring page advances by seven, coprime to both 10 and 18.
+    let shift = ((page_pair / pages_per_cycle + page_pair % pages_per_cycle) as u128 * 7
+        % positions as u128) as usize;
+    ((HEIGHT - height) / 2 + shift) % positions
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     Hold,
@@ -392,8 +403,7 @@ impl Animation {
         if rows.is_empty() {
             return frame;
         }
-        let height = (rows.len() - 1) * LINE_ADVANCE + GLYPH_HEIGHT;
-        let top = (HEIGHT - height) / 2;
+        let top = page_top(lines, self.page_index, rows.len());
         let marquee_ms = match self.phase {
             Phase::Enter => 0,
             Phase::Hold => self.elapsed_ms,
@@ -430,7 +440,7 @@ impl Animation {
     }
 }
 
-/// Number of pages before the 3/2 sequence returns to its initial position.
+/// Number of pages before the 3/2 reading sequence repeats.
 pub fn page_cycle_length(lines: &[String]) -> usize {
     if lines.is_empty() {
         return 0;
@@ -642,6 +652,58 @@ mod tests {
         assert_eq!(page_cycle_length(&six), 14);
         assert_eq!(page_lines(&six, 14), page_lines(&six, 0));
         assert!(page_lines(&[], 0).is_empty());
+    }
+
+    #[test]
+    fn every_recurring_page_visits_all_vertical_positions_equally() {
+        for line_count in 1..=30 {
+            let lines = vec!["H".to_owned(); line_count];
+            let cycle = page_cycle_length(&lines) as u64;
+            for page_index in 0..cycle {
+                let row_count = page_lines(&lines, page_index).len();
+                let height = (row_count - 1) * LINE_ADVANCE + GLYPH_HEIGHT;
+                let positions = HEIGHT - height + 1;
+                let mut visits = vec![0; positions];
+                for visit in 0..positions * 2 {
+                    let top = page_top(&lines, page_index + visit as u64 * cycle, row_count);
+                    visits[top] += 1;
+                }
+                assert_eq!(
+                    visits,
+                    vec![2; positions],
+                    "line count {line_count}, page {page_index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vertical_positions_reach_edges_and_stay_fixed_during_slides() {
+        let lines = vec!["H".to_owned(); 5];
+        let cycle = page_cycle_length(&lines) as u64;
+        for (page, rows) in [(0, 3), (1, 2)] {
+            let height = (rows - 1) * LINE_ADVANCE + GLYPH_HEIGHT;
+            for edge in [0, HEIGHT - height] {
+                let index = (0..HEIGHT)
+                    .map(|visit| page + visit as u64 * cycle)
+                    .find(|&index| page_top(&lines, index, rows) == edge)
+                    .unwrap();
+                let mut animation = Animation {
+                    page_index: index,
+                    phase: Phase::Hold,
+                    elapsed_ms: 0,
+                };
+                let held = animation.render(&lines, 5000);
+                assert_ne!(held[61 + (edge / 8) * WIDTH] & (1 << (edge % 8)), 0);
+                let bottom = edge + height - 1;
+                assert_ne!(held[61 + (bottom / 8) * WIDTH] & (1 << (bottom % 8)), 0);
+                animation.phase = Phase::Exit;
+                assert_eq!(held, animation.render(&lines, 5000));
+                animation.phase = Phase::Enter;
+                animation.elapsed_ms = SLIDE_MS;
+                assert_eq!(held, animation.render(&lines, 5000));
+            }
+        }
     }
 
     #[test]

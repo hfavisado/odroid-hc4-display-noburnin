@@ -21,11 +21,9 @@ source.
 
 ### Install a GitHub release
 
-**No binary release has been published yet.** Once one is available, this
-method installs its ARM64 Linux GNU binary without Rust or Cargo. Check that
-`uname -m` reports `aarch64` and `getconf LONG_BIT` reports `64`. The binary
-requires a compatible GNU libc; if it does not run on your OS, build from
-source instead. For 32-bit systems, build from source.
+Once a binary release is available, this method installs its statically linked
+ARM64 Linux binary without Rust or Cargo. Check that `uname -m` reports `aarch64`
+and `getconf LONG_BIT` reports `64`. For 32-bit systems, build from source.
 
 If upgrading while the systemd service is running, stop it first with
 `sudo systemctl stop odroid-hc4-display.service`. Download the release archive
@@ -34,15 +32,15 @@ and checksum into a separate directory:
 ```sh
 mkdir -p ~/odroid-hc4-display-download
 cd ~/odroid-hc4-display-download
-curl -fLO https://github.com/hfavisado/odroid-hc4-display-noburnin/releases/latest/download/odroid-hc4-display-aarch64-linux-gnu.tar.gz &&
-curl -fLO https://github.com/hfavisado/odroid-hc4-display-noburnin/releases/latest/download/odroid-hc4-display-aarch64-linux-gnu.tar.gz.sha256 &&
-sha256sum -c odroid-hc4-display-aarch64-linux-gnu.tar.gz.sha256
+curl -fLO https://github.com/hfavisado/odroid-hc4-display-noburnin/releases/latest/download/odroid-hc4-display-aarch64-linux-musl.tar.gz &&
+curl -fLO https://github.com/hfavisado/odroid-hc4-display-noburnin/releases/latest/download/odroid-hc4-display-aarch64-linux-musl.tar.gz.sha256 &&
+sha256sum -c odroid-hc4-display-aarch64-linux-musl.tar.gz.sha256
 ```
 
 Proceed only if the checksum reports `OK`:
 
 ```sh
-tar -xzf odroid-hc4-display-aarch64-linux-gnu.tar.gz
+tar -xzf odroid-hc4-display-aarch64-linux-musl.tar.gz
 sudo install -Dm755 odroid-hc4-display /usr/local/bin/odroid-hc4-display
 if [ ! -e /etc/odroid-hc4-display.conf ]; then
     sudo install -Dm644 odroid-hc4-display.conf /etc/odroid-hc4-display.conf
@@ -108,24 +106,14 @@ process before starting a service; only one process should drive the display.
 
 ### Start automatically with systemd
 
-On systems using systemd, create a service:
+On systems using systemd, install the service file from the release archive or
+source checkout. The command preserves an existing unit so local customizations
+are not overwritten:
 
 ```sh
-sudo tee /etc/systemd/system/odroid-hc4-display.service > /dev/null <<'EOF'
-[Unit]
-Description=ODROID-HC4 OLED status display
-After=local-fs.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/odroid-hc4-display
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
+if [ ! -e /etc/systemd/system/odroid-hc4-display.service ]; then
+    sudo install -Dm644 odroid-hc4-display.service /etc/systemd/system/odroid-hc4-display.service
+fi
 sudo systemctl daemon-reload
 sudo systemctl enable --now odroid-hc4-display.service
 sudo systemctl status --no-pager odroid-hc4-display.service
@@ -157,46 +145,29 @@ a macOS build cannot run on the HC4.
 
 ## Publish a GitHub release
 
-Releases are currently **manual**: the existing GitHub Actions workflow tests
-and builds the project but does not upload release binaries. The following
-process creates the ARM64 Linux GNU archive expected by the install instructions.
+The release workflow runs when a `v*` tag is pushed. It checks that the tag is
+`vMAJOR.MINOR.PATCH` and matches `Cargo.toml`, tests the ARM64 musl build,
+and packages the binary, config, and systemd service. It creates a draft GitHub
+Release, uploads the archive and SHA-256 checksum, downloads and verifies both,
+then publishes the release.
 
-1. Commit and push the changes to release. Check that the version in `Cargo.toml`
-   matches the intended tag. On the machine with the repository, create and push
-   an annotated tag (replace `v0.1.0` with the new version):
+Commit and push the release changes, including any version change in
+`Cargo.toml` and `Cargo.lock`. Merge the workflow into the default branch
+before tagging. Create and push an annotated tag matching the version (replace
+`v0.1.0` with the version being released):
 
-   ```sh
-   git tag -a v0.1.0 -m "Release v0.1.0"
-   git push origin v0.1.0
-   ```
+```sh
+git tag -a v0.1.0 -m "Release v0.1.0"
+git push origin v0.1.0
+```
 
-2. On an ARM64 Linux build machine or HC4, check out that exact tag in a clean
-   clone. Confirm that `rustc -vV` reports host `aarch64-unknown-linux-gnu` and
-   that Rust/Cargo are version 1.85 or newer. Build on a GNU libc system
-   compatible with the intended devices, and test the resulting binary on an
-   HC4 before publishing:
-
-   ```sh
-   git clone https://github.com/hfavisado/odroid-hc4-display-noburnin.git
-   cd odroid-hc4-display-noburnin
-   git checkout --detach v0.1.0
-   cargo build --release --locked
-   tar -czf odroid-hc4-display-aarch64-linux-gnu.tar.gz \
-       -C target/release odroid-hc4-display -C ../.. odroid-hc4-display.conf
-   sha256sum odroid-hc4-display-aarch64-linux-gnu.tar.gz > odroid-hc4-display-aarch64-linux-gnu.tar.gz.sha256
-   ```
-
-3. Open the repository's [Releases page](https://github.com/hfavisado/odroid-hc4-display-noburnin/releases),
-   choose **Draft a new release**, and select the tag. Add a title and release
-   notes, then upload both the `.tar.gz` archive and its `.sha256` file as
-   assets. If building on the HC4, copy those two files to the computer running
-   the browser first. Publish the release when ready.
-
-GitHub's automatically generated source archives are not executable binaries.
-Each release needs the two manually uploaded assets above; pushing a tag alone
-does not create them. See GitHub's
-[release documentation](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)
-for details.
+Check the **Release** workflow in GitHub Actions and then the
+[Releases page](https://github.com/hfavisado/odroid-hc4-display-noburnin/releases).
+The repository must permit Actions to write contents. If a run fails after
+creating a draft, remove that incomplete draft before re-running the failed
+workflow; do not delete the tag. A published release is not overwritten.
+Manually publishing a release bypasses these checks. CI does not test the OLED
+hardware, so test the release binary on an HC4 as well.
 
 ## Preview without hardware
 

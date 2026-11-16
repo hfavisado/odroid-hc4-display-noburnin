@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-22.04-arm
+    permissions:
+      contents: write
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+          targets: aarch64-unknown-linux-musl
+
+      - name: Check release version
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tags must have the form vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          version=$(cargo metadata --locked --no-deps --format-version 1 |
+            python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "odroid-hc4-display-noburnin"))')
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
+
+      - name: Install musl build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Check formatting and test
+        run: |
+          cargo fmt --check
+          cargo test --locked --target aarch64-unknown-linux-musl
+
+      - name: Build and verify binary
+        run: |
+          cargo build --release --locked --target aarch64-unknown-linux-musl
+          binary=target/aarch64-unknown-linux-musl/release/odroid-hc4-display
+          readelf -h "$binary" > "$RUNNER_TEMP/elf-header"
+          grep -Eq 'Machine:.*AArch64' "$RUNNER_TEMP/elf-header"
+          readelf -l "$binary" > "$RUNNER_TEMP/elf-program-headers"
+          readelf -d "$binary" > "$RUNNER_TEMP/elf-dynamic"
+          if grep -q INTERP "$RUNNER_TEMP/elf-program-headers" ||
+             grep -q '(NEEDED)' "$RUNNER_TEMP/elf-dynamic"; then
+            echo "Expected a statically linked binary" >&2
+            exit 1
+          fi
+          "$binary" --preview "$RUNNER_TEMP/preview.gif"
+          test -s "$RUNNER_TEMP/preview.gif"
+
+      - name: Package and verify assets
+        run: |
+          archive=odroid-hc4-display-aarch64-linux-musl.tar.gz
+          mkdir "$RUNNER_TEMP/package" "$RUNNER_TEMP/package-check"
+          install -m755 target/aarch64-unknown-linux-musl/release/odroid-hc4-display "$RUNNER_TEMP/package/odroid-hc4-display"
+          install -m644 odroid-hc4-display.conf odroid-hc4-display.service "$RUNNER_TEMP/package/"
+          tar -czf "$archive" -C "$RUNNER_TEMP/package" odroid-hc4-display odroid-hc4-display.conf odroid-hc4-display.service
+          sha256sum "$archive" > "$archive.sha256"
+          sha256sum -c "$archive.sha256"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/package-check"
+          cmp "$RUNNER_TEMP/package/odroid-hc4-display" "$RUNNER_TEMP/package-check/odroid-hc4-display"
+          cmp odroid-hc4-display.conf "$RUNNER_TEMP/package-check/odroid-hc4-display.conf"
+          cmp odroid-hc4-display.service "$RUNNER_TEMP/package-check/odroid-hc4-display.service"
+          "$RUNNER_TEMP/package-check/odroid-hc4-display" --help
+
+      - name: Create draft and verify uploaded assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archive=odroid-hc4-display-aarch64-linux-musl.tar.gz
+          gh release create "$GITHUB_REF_NAME" "$archive" "$archive.sha256" \
+            --draft --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+          mkdir "$RUNNER_TEMP/release-check"
+          gh release download "$GITHUB_REF_NAME" --dir "$RUNNER_TEMP/release-check" \
+            --pattern "$archive" --pattern "$archive.sha256"
+          (cd "$RUNNER_TEMP/release-check" && sha256sum -c "$archive.sha256")
+          cmp "$archive" "$RUNNER_TEMP/release-check/$archive"
+          cmp "$archive.sha256" "$RUNNER_TEMP/release-check/$archive.sha256"
+
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false

@@ -1,0 +1,12 @@
+[Unit]
+Description=ODROID-HC4 OLED status display
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/odroid-hc4-display
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

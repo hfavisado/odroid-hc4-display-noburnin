@@ -12,23 +12,191 @@ in from the right. Long readings scroll horizontally while the page is held.
 
 *Preview rendered with sample data; each lit pixel is one OLED pixel.*
 
-## Build and run
+## Deploy on an ODROID-HC4
 
-The program has no Cargo dependencies and targets Linux. Build it on the HC4
-(or cross-compile for its Linux architecture):
+The device needs Linux, `iproute2` (`ip`), GNU coreutils (`df`), and access to
+the OLED's I²C device. Commands below assume a shell on the HC4, for example
+after connecting with `ssh USER@HC4_IP`. Choose a release binary or build from
+source.
+
+### Install a GitHub release
+
+**No binary release has been published yet.** Once one is available, this
+method installs its ARM64 Linux GNU binary without Rust or Cargo. Check that
+`uname -m` reports `aarch64` and `getconf LONG_BIT` reports `64`. The binary
+requires a compatible GNU libc; if it does not run on your OS, build from
+source instead. For 32-bit systems, build from source.
+
+If upgrading while the systemd service is running, stop it first with
+`sudo systemctl stop odroid-hc4-display.service`. Download the release archive
+and checksum into a separate directory:
 
 ```sh
+mkdir -p ~/odroid-hc4-display-download
+cd ~/odroid-hc4-display-download
+curl -fLO https://github.com/hfavisado/odroid-hc4-display-noburnin/releases/latest/download/odroid-hc4-display-aarch64-linux-gnu.tar.gz &&
+curl -fLO https://github.com/hfavisado/odroid-hc4-display-noburnin/releases/latest/download/odroid-hc4-display-aarch64-linux-gnu.tar.gz.sha256 &&
+sha256sum -c odroid-hc4-display-aarch64-linux-gnu.tar.gz.sha256
+```
+
+Proceed only if the checksum reports `OK`:
+
+```sh
+tar -xzf odroid-hc4-display-aarch64-linux-gnu.tar.gz
+sudo install -Dm755 odroid-hc4-display /usr/local/bin/odroid-hc4-display
+if [ ! -e /etc/odroid-hc4-display.conf ]; then
+    sudo install -Dm644 odroid-hc4-display.conf /etc/odroid-hc4-display.conf
+fi
+```
+
+The checksum detects corruption but does not independently authenticate the
+download. Edit `/etc/odroid-hc4-display.conf` as needed, then follow
+[the display check](#check-the-display-and-run-manually). After an upgrade,
+restart the existing service with `sudo systemctl start odroid-hc4-display.service`
+instead of running it manually.
+
+### Build and install from source
+
+Building on the HC4 also requires Git, Rust and Cargo 1.85 or newer. The program
+has no Cargo dependencies. Check `rustc --version` and `cargo --version`;
+if your distribution's Rust packages are too old, see the
+[Rust installation instructions](https://www.rust-lang.org/tools/install).
+
+```sh
+git clone https://github.com/hfavisado/odroid-hc4-display-noburnin.git
+cd odroid-hc4-display-noburnin
 cargo build --release
 sudo install -Dm755 target/release/odroid-hc4-display /usr/local/bin/odroid-hc4-display
-sudo install -Dm644 odroid-hc4-display.conf /etc/odroid-hc4-display.conf
+```
+
+Install the example configuration if you do not already have one, then edit it
+to select the disks and readings you want:
+
+```sh
+if [ ! -e /etc/odroid-hc4-display.conf ]; then
+    sudo install -Dm644 odroid-hc4-display.conf /etc/odroid-hc4-display.conf
+fi
+sudo nano /etc/odroid-hc4-display.conf
+```
+
+The built-in defaults are used if the config file is absent. Use `--config PATH`
+to select a different file. See [Configuration](#configuration) for the options.
+
+### Check the display and run manually
+
+The default OLED device is `/dev/i2c-1`, at address `0x3c`. Check that the device
+node exists:
+
+```sh
+ls -l /dev/i2c-1
+```
+
+If it is missing, enable I²C for your HC4 operating system. If `i2c-dev` is
+available as a kernel module, `sudo modprobe i2c-dev` loads it; consult your
+OS's documentation for enabling the bus and loading the module at boot. If the
+bus or address differs, update `i2c_device` and `i2c_address` in the config.
+The process needs read and write access to the I²C device.
+
+Stop any other software using the OLED, then test:
+
+```sh
 sudo /usr/local/bin/odroid-hc4-display
 ```
 
-The example configuration is included in this repository. The built-in defaults
-are used if `/etc/odroid-hc4-display.conf` is absent. Use `--config PATH` to
-select another configuration. The process needs write access to the I²C device
-(by default `/dev/i2c-1`); enable the Linux `i2c-dev` interface and run it as
-root or grant the service account access to that device.
+The status pages should appear on the OLED. Press **Ctrl+C** to stop the manual
+process before starting a service; only one process should drive the display.
+
+### Start automatically with systemd
+
+On systems using systemd, create a service:
+
+```sh
+sudo tee /etc/systemd/system/odroid-hc4-display.service > /dev/null <<'EOF'
+[Unit]
+Description=ODROID-HC4 OLED status display
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/odroid-hc4-display
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now odroid-hc4-display.service
+sudo systemctl status --no-pager odroid-hc4-display.service
+```
+
+The service runs as root by default so it can access the I²C device. To use a
+less privileged account, configure `User=` and ensure that account has read
+and write access to the device.
+
+To inspect errors or restart after editing the config:
+
+```sh
+sudo journalctl -u odroid-hc4-display.service -b --no-pager
+sudo systemctl restart odroid-hc4-display.service
+```
+
+For source-build updates, build the new source on the HC4, stop the service,
+reinstall the binary, and start the service again. Keep your existing config:
+
+```sh
+cargo build --release
+sudo systemctl stop odroid-hc4-display.service
+sudo install -Dm755 target/release/odroid-hc4-display /usr/local/bin/odroid-hc4-display
+sudo systemctl start odroid-hc4-display.service
+```
+
+If you build on another computer, cross-compile for the HC4's Linux architecture;
+a macOS build cannot run on the HC4.
+
+## Publish a GitHub release
+
+Releases are currently **manual**: the existing GitHub Actions workflow tests
+and builds the project but does not upload release binaries. The following
+process creates the ARM64 Linux GNU archive expected by the install instructions.
+
+1. Commit and push the changes to release. Check that the version in `Cargo.toml`
+   matches the intended tag. On the machine with the repository, create and push
+   an annotated tag (replace `v0.1.0` with the new version):
+
+   ```sh
+   git tag -a v0.1.0 -m "Release v0.1.0"
+   git push origin v0.1.0
+   ```
+
+2. On an ARM64 Linux build machine or HC4, check out that exact tag in a clean
+   clone. Confirm that `rustc -vV` reports host `aarch64-unknown-linux-gnu` and
+   that Rust/Cargo are version 1.85 or newer. Build on a GNU libc system
+   compatible with the intended devices, and test the resulting binary on an
+   HC4 before publishing:
+
+   ```sh
+   git clone https://github.com/hfavisado/odroid-hc4-display-noburnin.git
+   cd odroid-hc4-display-noburnin
+   git checkout --detach v0.1.0
+   cargo build --release --locked
+   tar -czf odroid-hc4-display-aarch64-linux-gnu.tar.gz \
+       -C target/release odroid-hc4-display -C ../.. odroid-hc4-display.conf
+   sha256sum odroid-hc4-display-aarch64-linux-gnu.tar.gz > odroid-hc4-display-aarch64-linux-gnu.tar.gz.sha256
+   ```
+
+3. Open the repository's [Releases page](https://github.com/hfavisado/odroid-hc4-display-noburnin/releases),
+   choose **Draft a new release**, and select the tag. Add a title and release
+   notes, then upload both the `.tar.gz` archive and its `.sha256` file as
+   assets. If building on the HC4, copy those two files to the computer running
+   the browser first. Publish the release when ready.
+
+GitHub's automatically generated source archives are not executable binaries.
+Each release needs the two manually uploaded assets above; pushing a tag alone
+does not create them. See GitHub's
+[release documentation](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)
+for details.
 
 ## Preview without hardware
 

@@ -1,7 +1,5 @@
 use odroid_hc4_display_noburnin::preview::{render_gif, sample_lines};
-use odroid_hc4_display_noburnin::{
-    Config, I2cDisplay, collect_lines, normalize_scroll_offset, render_frame,
-};
+use odroid_hc4_display_noburnin::{Animation, Config, I2cDisplay, collect_lines};
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -32,31 +30,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             sample_lines()
         };
-        std::fs::write(
-            &output,
-            render_gif(&lines, config.scroll_speed, config.refresh_ms),
-        )?;
+        std::fs::write(&output, render_gif(&lines, config.page_interval_ms))?;
         println!("wrote preview to {}", output.display());
         return Ok(());
     }
     let mut display = I2cDisplay::new(&config.i2c_device, config.i2c_address)?;
-    let mut last_frame = Instant::now();
-    let mut last_data_refresh = Instant::now();
-    let mut scroll_offset = 0.0;
     let mut lines = collect_lines(&config);
+    let mut animation = Animation::default();
+    let mut last_frame = Instant::now();
+    let mut last_data_refresh = last_frame;
 
     loop {
-        display.show(&render_frame(&lines, scroll_offset))?;
-        thread::sleep(Duration::from_millis(config.refresh_ms));
         let now = Instant::now();
-        scroll_offset += config.scroll_speed * now.duration_since(last_frame).as_secs_f32();
-        scroll_offset = normalize_scroll_offset(scroll_offset, lines.len());
-        last_frame = now;
         if now.duration_since(last_data_refresh) >= DATA_REFRESH {
             lines = collect_lines(&config);
-            scroll_offset = normalize_scroll_offset(scroll_offset, lines.len());
             last_data_refresh = now;
         }
+        let elapsed_ms = last_frame.elapsed().as_millis() as u64;
+        last_frame += Duration::from_millis(elapsed_ms);
+        animation.advance(elapsed_ms, &lines, config.page_interval_ms);
+        display.show(&animation.render(&lines, config.page_interval_ms))?;
+        thread::sleep(Duration::from_millis(config.refresh_ms.min(100)));
     }
 }
 

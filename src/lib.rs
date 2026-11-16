@@ -6,7 +6,13 @@ use std::process::Command;
 
 pub const WIDTH: usize = 128;
 pub const HEIGHT: usize = 32;
-pub const LINE_SPACING: f32 = 17.0;
+const GLYPH_WIDTH: usize = 5;
+const GLYPH_HEIGHT: usize = 7;
+const CHAR_ADVANCE: usize = 6;
+const LINE_ADVANCE: usize = 8;
+const SLIDE_MS: u64 = 800;
+const MARQUEE_PAUSE_MS: u64 = 1000;
+const MARQUEE_PIXELS_PER_SECOND: u64 = 12;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -19,6 +25,7 @@ pub struct Config {
     pub i2c_address: u8,
     pub scroll_speed: f32,
     pub refresh_ms: u64,
+    pub page_interval_ms: u64,
 }
 
 impl Default for Config {
@@ -33,6 +40,7 @@ impl Default for Config {
             i2c_address: 0x3c,
             scroll_speed: 5.0,
             refresh_ms: 100,
+            page_interval_ms: 5000,
         }
     }
 }
@@ -115,6 +123,17 @@ impl Config {
                     if !(20..=2000).contains(&config.refresh_ms) {
                         return Err(format!(
                             "line {}: refresh_ms must be between 20 and 2000",
+                            index + 1
+                        ));
+                    }
+                }
+                "page_interval_ms" => {
+                    config.page_interval_ms = value
+                        .parse()
+                        .map_err(|_| format!("line {}: invalid page_interval_ms", index + 1))?;
+                    if !(1000..=60000).contains(&config.page_interval_ms) {
+                        return Err(format!(
+                            "line {}: page_interval_ms must be between 1000 and 60000",
                             index + 1
                         ));
                     }
@@ -278,115 +297,226 @@ fn bytes_to_human(bytes: u64) -> String {
     }
 }
 
-pub fn render_frame(lines: &[String], scroll_offset: f32) -> [u8; WIDTH * HEIGHT / 8] {
-    let mut frame = [0; WIDTH * HEIGHT / 8];
+fn page_lines(lines: &[String], page_index: u64) -> Vec<&str> {
     if lines.is_empty() {
-        return frame;
+        return Vec::new();
     }
-    let offset = normalize_scroll_offset(scroll_offset, lines.len());
-
-    for world_index in -2..(lines.len() as isize + 2) {
-        let y = HEIGHT as f32 + world_index as f32 * LINE_SPACING - offset;
-        let scale = scroll_scale(y);
-        let line = &lines[world_index.rem_euclid(lines.len() as isize) as usize];
-        draw_text(&mut frame, line, y, scale);
-    }
-
-    frame
+    let length = lines.len() + usize::from(lines.len() % 2 == 0);
+    let start = ((u128::from(page_index / 2) * 5 + u128::from(page_index % 2) * 3) % length as u128)
+        as usize;
+    let count = if page_index % 2 == 0 { 3 } else { 2 };
+    (0..count)
+        .map(|offset| {
+            lines
+                .get((start + offset) % length)
+                .map_or("", String::as_str)
+        })
+        .collect()
 }
 
-pub fn normalize_scroll_offset(offset: f32, line_count: usize) -> f32 {
-    if line_count == 0 {
-        0.0
-    } else {
-        offset.rem_euclid(LINE_SPACING * line_count as f32)
+fn text_width(text: &str) -> usize {
+    text.chars()
+        .count()
+        .saturating_mul(CHAR_ADVANCE)
+        .saturating_sub(1)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    Hold,
+    Exit,
+    Enter,
+}
+
+pub struct Animation {
+    page_index: u64,
+    phase: Phase,
+    elapsed_ms: u64,
+}
+
+impl Default for Animation {
+    fn default() -> Self {
+        Self {
+            page_index: 0,
+            phase: Phase::Hold,
+            elapsed_ms: 0,
+        }
     }
 }
 
-fn draw_text(frame: &mut [u8; WIDTH * HEIGHT / 8], text: &str, top: f32, scale: f32) {
-    let text = text.to_ascii_uppercase();
-    let advance = 4.0 * scale;
-    let width = (text.chars().count() as f32 * advance - scale).max(0.0);
-    let left = ((WIDTH as f32 - width) / 2.0).floor();
-    let top = top.floor();
+impl Animation {
+    fn hold_ms(&self, lines: &[String], minimum_ms: u64) -> u64 {
+        let overflow = page_lines(lines, self.page_index)
+            .iter()
+            .map(|line| text_width(line).saturating_sub(WIDTH) as u64)
+            .max()
+            .unwrap_or(0);
+        if overflow == 0 {
+            return minimum_ms;
+        }
+        let travel_ms = overflow
+            .saturating_mul(1000)
+            .div_ceil(MARQUEE_PIXELS_PER_SECOND);
+        minimum_ms.max(travel_ms.saturating_add(2 * MARQUEE_PAUSE_MS))
+    }
 
-    for (character_index, character) in text.chars().enumerate() {
-        let glyph = glyph(character);
-        let origin_x = left + character_index as f32 * advance;
-        for (row, bits) in glyph.iter().enumerate() {
-            for column in 0..3 {
-                if bits & (1 << (2 - column)) == 0 {
-                    continue;
+    fn phase_duration_ms(&self, lines: &[String], minimum_ms: u64) -> u64 {
+        match self.phase {
+            Phase::Hold => self.hold_ms(lines, minimum_ms),
+            Phase::Exit | Phase::Enter => SLIDE_MS,
+        }
+    }
+
+    pub fn advance(&mut self, elapsed_ms: u64, lines: &[String], minimum_ms: u64) {
+        self.elapsed_ms = self.elapsed_ms.saturating_add(elapsed_ms);
+        loop {
+            let duration = self.phase_duration_ms(lines, minimum_ms);
+            if self.elapsed_ms < duration {
+                break;
+            }
+            self.elapsed_ms -= duration;
+            self.phase = match self.phase {
+                Phase::Hold => Phase::Exit,
+                Phase::Exit => {
+                    self.page_index = self.page_index.wrapping_add(1);
+                    Phase::Enter
                 }
-                let x_start = (origin_x + column as f32 * scale).floor() as isize;
-                let x_end = (origin_x + (column + 1) as f32 * scale).ceil() as isize;
-                let y_start = (top + row as f32 * scale).floor() as isize;
-                let y_end = (top + (row + 1) as f32 * scale).ceil() as isize;
-                for y in y_start..y_end {
-                    for x in x_start..x_end {
-                        set_pixel(frame, x, y);
-                    }
+                Phase::Enter => Phase::Hold,
+            };
+        }
+    }
+
+    pub fn render(&self, lines: &[String], minimum_ms: u64) -> [u8; WIDTH * HEIGHT / 8] {
+        let rows = page_lines(lines, self.page_index);
+        let mut frame = [0; WIDTH * HEIGHT / 8];
+        if rows.is_empty() {
+            return frame;
+        }
+        let height = (rows.len() - 1) * LINE_ADVANCE + GLYPH_HEIGHT;
+        let top = (HEIGHT - height) / 2;
+        let marquee_ms = match self.phase {
+            Phase::Enter => 0,
+            Phase::Hold => self.elapsed_ms,
+            Phase::Exit => self.hold_ms(lines, minimum_ms),
+        };
+        let marquee = marquee_ms
+            .saturating_sub(MARQUEE_PAUSE_MS)
+            .saturating_mul(MARQUEE_PIXELS_PER_SECOND)
+            / 1000;
+        for (row, text) in rows.iter().enumerate() {
+            let width = text_width(text);
+            let left = if width <= WIDTH {
+                ((WIDTH - width) / 2) as isize
+            } else {
+                -(marquee.min((width - WIDTH) as u64) as isize)
+            };
+            draw_text(&mut frame, text, left, top + row * LINE_ADVANCE);
+        }
+        let distance = (self.elapsed_ms.min(SLIDE_MS) * WIDTH as u64 / SLIDE_MS) as isize;
+        let offset = match self.phase {
+            Phase::Hold => return frame,
+            Phase::Exit => -distance,
+            Phase::Enter => WIDTH as isize - distance,
+        };
+        let mut shifted = [0; WIDTH * HEIGHT / 8];
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                if frame[x + (y / 8) * WIDTH] & (1 << (y % 8)) != 0 {
+                    set_pixel(&mut shifted, x as isize + offset, y);
+                }
+            }
+        }
+        shifted
+    }
+}
+
+/// Number of pages before the 3/2 sequence returns to its initial position.
+pub fn page_cycle_length(lines: &[String]) -> usize {
+    if lines.is_empty() {
+        return 0;
+    }
+    let length = lines.len() + usize::from(lines.len() % 2 == 0);
+    if length % 5 == 0 {
+        2 * (length / 5)
+    } else {
+        2 * length
+    }
+}
+
+fn draw_text(frame: &mut [u8; WIDTH * HEIGHT / 8], text: &str, left: isize, top: usize) {
+    for (character_index, character) in text.chars().enumerate() {
+        let x = left + (character_index * CHAR_ADVANCE) as isize;
+        if x >= WIDTH as isize {
+            break;
+        }
+        if x + GLYPH_WIDTH as isize <= 0 {
+            continue;
+        }
+        for (row, bits) in glyph(character.to_ascii_uppercase()).iter().enumerate() {
+            for column in 0..GLYPH_WIDTH {
+                if bits & (1 << (GLYPH_WIDTH - 1 - column)) != 0 {
+                    set_pixel(frame, x + column as isize, top + row);
                 }
             }
         }
     }
 }
 
-fn set_pixel(frame: &mut [u8; WIDTH * HEIGHT / 8], x: isize, y: isize) {
-    if x < 0 || y < 0 || x >= WIDTH as isize || y >= HEIGHT as isize {
+fn set_pixel(frame: &mut [u8; WIDTH * HEIGHT / 8], x: isize, y: usize) {
+    if x < 0 || x >= WIDTH as isize || y >= HEIGHT {
         return;
     }
-    let index = x as usize + (y as usize / 8) * WIDTH;
-    frame[index] |= 1 << (y as usize % 8);
+    let index = x as usize + (y / 8) * WIDTH;
+    frame[index] |= 1 << (y % 8);
 }
 
-fn glyph(character: char) -> [u8; 5] {
+fn glyph(character: char) -> [u8; 7] {
     match character {
-        'A' => [2, 5, 7, 5, 5],
-        'B' => [6, 5, 6, 5, 6],
-        'C' => [3, 4, 4, 4, 3],
-        'D' => [6, 5, 5, 5, 6],
-        'E' => [7, 4, 6, 4, 7],
-        'F' => [7, 4, 6, 4, 4],
-        'G' => [3, 4, 5, 5, 3],
-        'H' => [5, 5, 7, 5, 5],
-        'I' => [7, 2, 2, 2, 7],
-        'J' => [1, 1, 1, 5, 2],
-        'K' => [5, 5, 6, 5, 5],
-        'L' => [4, 4, 4, 4, 7],
-        'M' => [5, 7, 7, 5, 5],
-        'N' => [5, 7, 7, 7, 5],
-        'O' => [2, 5, 5, 5, 2],
-        'P' => [6, 5, 6, 4, 4],
-        'Q' => [2, 5, 5, 3, 1],
-        'R' => [6, 5, 6, 5, 5],
-        'S' => [3, 4, 2, 1, 6],
-        'T' => [7, 2, 2, 2, 2],
-        'U' => [5, 5, 5, 5, 7],
-        'V' => [5, 5, 5, 5, 2],
-        'W' => [5, 5, 7, 7, 5],
-        'X' => [5, 5, 2, 5, 5],
-        'Y' => [5, 5, 2, 2, 2],
-        'Z' => [7, 1, 2, 4, 7],
-        '0' => [7, 5, 5, 5, 7],
-        '1' => [2, 6, 2, 2, 7],
-        '2' => [6, 1, 2, 4, 7],
-        '3' => [6, 1, 2, 1, 6],
-        '4' => [5, 5, 7, 1, 1],
-        '5' => [7, 4, 6, 1, 6],
-        '6' => [3, 4, 6, 5, 2],
-        '7' => [7, 1, 2, 2, 2],
-        '8' => [7, 5, 7, 5, 7],
-        '9' => [2, 5, 3, 1, 6],
-        ':' => [0, 2, 0, 2, 0],
-        '.' => [0, 0, 0, 0, 2],
-        '/' => [1, 1, 2, 4, 4],
-        '%' => [5, 1, 2, 4, 5],
-        '-' => [0, 0, 7, 0, 0],
-        '_' => [0, 0, 0, 0, 7],
-        '+' => [0, 2, 7, 2, 0],
-        ' ' => [0; 5],
-        _ => [7, 1, 2, 0, 2],
+        'A' => [14, 17, 17, 31, 17, 17, 17],
+        'B' => [30, 17, 17, 30, 17, 17, 30],
+        'C' => [14, 17, 16, 16, 16, 17, 14],
+        'D' => [30, 17, 17, 17, 17, 17, 30],
+        'E' => [31, 16, 16, 30, 16, 16, 31],
+        'F' => [31, 16, 16, 30, 16, 16, 16],
+        'G' => [14, 17, 16, 23, 17, 17, 15],
+        'H' => [17, 17, 17, 31, 17, 17, 17],
+        'I' => [31, 4, 4, 4, 4, 4, 31],
+        'J' => [7, 2, 2, 2, 18, 18, 12],
+        'K' => [17, 18, 20, 24, 20, 18, 17],
+        'L' => [16, 16, 16, 16, 16, 16, 31],
+        'M' => [17, 27, 21, 21, 17, 17, 17],
+        'N' => [17, 25, 21, 19, 17, 17, 17],
+        'O' => [14, 17, 17, 17, 17, 17, 14],
+        'P' => [30, 17, 17, 30, 16, 16, 16],
+        'Q' => [14, 17, 17, 17, 21, 18, 13],
+        'R' => [30, 17, 17, 30, 20, 18, 17],
+        'S' => [15, 16, 16, 14, 1, 1, 30],
+        'T' => [31, 4, 4, 4, 4, 4, 4],
+        'U' => [17, 17, 17, 17, 17, 17, 14],
+        'V' => [17, 17, 17, 17, 17, 10, 4],
+        'W' => [17, 17, 17, 21, 21, 21, 10],
+        'X' => [17, 17, 10, 4, 10, 17, 17],
+        'Y' => [17, 17, 10, 4, 4, 4, 4],
+        'Z' => [31, 1, 2, 4, 8, 16, 31],
+        '0' => [14, 17, 19, 21, 25, 17, 14],
+        '1' => [4, 12, 4, 4, 4, 4, 14],
+        '2' => [14, 17, 1, 2, 4, 8, 31],
+        '3' => [30, 1, 1, 14, 1, 1, 30],
+        '4' => [2, 6, 10, 18, 31, 2, 2],
+        '5' => [31, 16, 16, 30, 1, 1, 30],
+        '6' => [14, 16, 16, 30, 17, 17, 14],
+        '7' => [31, 1, 2, 4, 8, 8, 8],
+        '8' => [14, 17, 17, 14, 17, 17, 14],
+        '9' => [14, 17, 17, 15, 1, 1, 14],
+        ':' => [0, 4, 4, 0, 4, 4, 0],
+        '.' => [0, 0, 0, 0, 0, 4, 4],
+        '/' => [1, 1, 2, 4, 8, 16, 16],
+        '%' => [17, 2, 4, 8, 16, 17, 0],
+        '-' => [0, 0, 0, 31, 0, 0, 0],
+        '_' => [0, 0, 0, 0, 0, 0, 31],
+        '+' => [0, 4, 4, 31, 4, 4, 0],
+        ' ' => [0; 7],
+        _ => [14, 17, 1, 2, 4, 0, 4],
     }
 }
 
@@ -442,9 +572,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_accepts_multiple_disks_and_custom_scroll_settings() {
+    fn config_accepts_multiple_disks_and_page_settings() {
         let config = Config::parse(
-            "show_ipv4=false\nnetwork_interface=eth0\ndisk=/\ndisk=/mnt/data\nscroll_speed=8.5\ni2c_address=0x3d\n",
+            "show_ipv4=false\nnetwork_interface=eth0\ndisk=/\ndisk=/mnt/data\nscroll_speed=8.5\npage_interval_ms=7000\ni2c_address=0x3d\n",
         )
         .unwrap();
 
@@ -455,12 +585,15 @@ mod tests {
             [PathBuf::from("/"), PathBuf::from("/mnt/data")]
         );
         assert_eq!(config.scroll_speed, 8.5);
+        assert_eq!(config.page_interval_ms, 7000);
         assert_eq!(config.i2c_address, 0x3d);
     }
 
     #[test]
     fn config_rejects_bad_values_and_relative_mounts() {
         assert!(Config::parse("scroll_speed=0\n").is_err());
+        assert!(Config::parse("page_interval_ms=999\n").is_err());
+        assert!(Config::parse("page_interval_ms=60001\n").is_err());
         assert!(Config::parse("disk=relative\n").is_err());
         assert!(Config::parse("i2c_address=0x80\n").is_err());
     }
@@ -486,15 +619,90 @@ mod tests {
     }
 
     #[test]
-    fn lines_shrink_as_they_scroll_up_and_frames_change() {
-        let lines = vec!["IP 192.168.1.2".to_owned(), "CPU TEMP 45C".to_owned()];
-        assert!(render_frame(&lines, 0.0).iter().any(|byte| *byte != 0));
-        assert_ne!(render_frame(&lines, 0.0), render_frame(&lines, 7.0));
-        assert!(scroll_scale(32.0) > scroll_scale(-32.0));
-        assert_eq!(normalize_scroll_offset(100.0, 2), 32.0);
-    }
-}
+    fn alternating_pages_follow_the_requested_sequence() {
+        let five: Vec<String> = (1..=5).map(|n| n.to_string()).collect();
+        assert_eq!(page_lines(&five, 0), ["1", "2", "3"]);
+        assert_eq!(page_lines(&five, 1), ["4", "5"]);
+        assert_eq!(page_lines(&five, 2), ["1", "2", "3"]);
+        assert_eq!(page_cycle_length(&five), 2);
 
-fn scroll_scale(y: f32) -> f32 {
-    (3.0 - (32.0 - y).clamp(0.0, 64.0) / 32.0).clamp(1.0, 3.0)
+        let six: Vec<String> = (1..=6).map(|n| n.to_string()).collect();
+        let expected = [
+            vec!["1", "2", "3"],
+            vec!["4", "5"],
+            vec!["6", "", "1"],
+            vec!["2", "3"],
+            vec!["4", "5", "6"],
+            vec!["", "1"],
+            vec!["2", "3", "4"],
+        ];
+        for (index, rows) in expected.iter().enumerate() {
+            assert_eq!(&page_lines(&six, index as u64), rows);
+        }
+        assert_eq!(page_cycle_length(&six), 14);
+        assert_eq!(page_lines(&six, 14), page_lines(&six, 0));
+        assert!(page_lines(&[], 0).is_empty());
+    }
+
+    #[test]
+    fn slides_exit_left_then_enter_right_and_center_rows() {
+        let lines = vec!["H".to_owned(); 5];
+        let mut animation = Animation::default();
+        let centered = animation.render(&lines, 5000);
+        assert_ne!(centered[61] & (1 << 4), 0);
+        assert_ne!(centered[61 + WIDTH] & (1 << 4), 0);
+        assert_ne!(centered[61 + 2 * WIDTH] & (1 << 4), 0);
+        animation.advance(5000, &lines, 5000);
+        animation.advance(400, &lines, 5000);
+        let exiting = animation.render(&lines, 5000);
+        assert_ne!(exiting[1] & (1 << 4), 0);
+        animation.advance(400, &lines, 5000);
+        assert_eq!(animation.render(&lines, 5000), [0; WIDTH * HEIGHT / 8]);
+        animation.advance(400, &lines, 5000);
+        let entering = animation.render(&lines, 5000);
+        assert_ne!(entering[125 + WIDTH] & 1, 0);
+        animation.advance(400, &lines, 5000);
+        let two_rows = animation.render(&lines, 5000);
+        assert_ne!(two_rows[61 + WIDTH] & 1, 0);
+        assert_ne!(two_rows[61 + 2 * WIDTH] & 1, 0);
+        assert_eq!(animation.render(&[], 5000), [0; WIDTH * HEIGHT / 8]);
+
+        let mut skipped = Animation::default();
+        skipped.advance(5000 + 2 * SLIDE_MS + 5000 + 400, &lines, 5000);
+        assert_eq!(
+            (skipped.page_index, skipped.phase, skipped.elapsed_ms),
+            (1, Phase::Exit, 400)
+        );
+    }
+
+    #[test]
+    fn marquee_reaches_the_end_before_the_page_exits() {
+        let lines = vec!["H".repeat(30); 5];
+        let mut animation = Animation::default();
+        let overflow = text_width(&lines[0]) - WIDTH;
+        let duration = animation.hold_ms(&lines, 1000);
+        assert!(
+            duration
+                >= MARQUEE_PAUSE_MS * 2
+                    + (overflow as u64 * 1000).div_ceil(MARQUEE_PIXELS_PER_SECOND)
+        );
+        let first = animation.render(&lines, 1000);
+        animation.advance(duration - 1, &lines, 1000);
+        let last = animation.render(&lines, 1000);
+        assert_ne!(first, last);
+        let mut expected = [0; WIDTH * HEIGHT / 8];
+        for row in 0..3 {
+            draw_text(
+                &mut expected,
+                &lines[0],
+                -(overflow as isize),
+                4 + row * LINE_ADVANCE,
+            );
+        }
+        assert_eq!(last, expected);
+        assert_eq!(animation.phase, Phase::Hold);
+        animation.advance(1, &lines, 1000);
+        assert_eq!(animation.phase, Phase::Exit);
+        assert_eq!(last, animation.render(&lines, 1000));
+    }
 }

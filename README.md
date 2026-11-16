@@ -1,11 +1,12 @@
 # odroid-hc4-display-noburnin
 
 A small Rust program for the ODROID-HC4's 128×32 I²C OLED. It displays IPv4
-addresses, thermal readings, and disk usage as a repeating, perspective-style
-credits roll: lines enter large from the bottom, shrink while moving upward,
-and return to the bottom after leaving the top to reduce static OLED content.
+addresses, thermal readings, and disk usage using a crisp 5×7 pixel font.
+Vertically centered pages alternate between three and two readings. Each page
+slides off to the left before the next slides in from the right. Long readings
+scroll horizontally while the page is held.
 
-![Animated preview of the scrolling OLED display](docs/preview.gif)
+![Animated preview of the paged OLED display](docs/preview.gif)
 
 *Preview rendered with sample data; each lit pixel is one OLED pixel.*
 
@@ -29,18 +30,19 @@ root or grant the service account access to that device.
 
 ## Preview without hardware
 
-`--preview` renders one full scroll loop to an animated GIF and exits, without
-touching the I²C device, so it works on any Linux/macOS machine with Rust:
+`--preview` renders up to eight pages of the animation to a GIF and exits,
+without touching the I²C device, so it works on any Linux/macOS machine with Rust:
 
 ```sh
 cargo run --release -- --preview docs/preview.gif            # sample data
 cargo run --release -- --preview out.gif --live              # this machine's IPs, temps, disks
-cargo run --release -- --config my.conf --preview out.gif    # honours scroll_speed / refresh_ms
+cargo run --release -- --config my.conf --preview out.gif    # honours page_interval_ms
 ```
 
-The GIF is written by a built-in encoder (no extra crates) and loops seamlessly.
-The one in this README is `docs/preview.gif`; regenerate it with the first
-command after changing the rendering code.
+The GIF is written by a built-in encoder (no extra crates). Sequences longer
+than eight pages are shortened in the preview; the real display continues
+through the full sequence. The one in this README is `docs/preview.gif`;
+regenerate it with the first command after changing the rendering code.
 
 ## Configuration
 
@@ -56,16 +58,22 @@ disk=/
 disk=/mnt/data
 i2c_device=/dev/i2c-1
 i2c_address=0x3c
-scroll_speed=5
+page_interval_ms=5000
 refresh_ms=100
 ```
 
 `network_interface` is optional; when unset, IPv4 addresses from all interfaces
 with a global address are shown. Each `disk` line adds a mount path to display; the
 default is `/`. Configure one line per mounted filesystem you want to monitor.
-`scroll_speed` is pixels per second (0.1–100), and `refresh_ms` is the frame
-interval in milliseconds (20–2000). Disabling all three `show_*` settings
-leaves the display blank.
+`page_interval_ms` is the minimum time a page remains centered in milliseconds
+(1000–60000). A page with a long reading stays longer if needed to show the
+entire reading. `refresh_ms` is the display refresh interval in milliseconds
+(20–2000); the sleep between animation frames is capped at 100 ms.
+Existing `scroll_speed` settings are accepted for compatibility but no longer
+affect the display. Disabling all three `show_*` settings leaves the display blank.
+The list repeats continuously; if it has an even number of readings, one blank
+line is appended before paging. Animation can spread usage but cannot guarantee
+perfectly even wear.
 
 ## Data sources
 

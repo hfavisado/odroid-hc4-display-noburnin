@@ -1,7 +1,7 @@
-//! Offline preview: renders the scrolling display to an animated GIF so the
+//! Offline preview: renders the paged display to an animated GIF so the
 //! result can be checked (and shown in the README) without OLED hardware.
 
-use crate::{HEIGHT, LINE_SPACING, WIDTH, normalize_scroll_offset, render_frame};
+use crate::{Animation, HEIGHT, Phase, WIDTH, page_cycle_length};
 use std::collections::HashMap;
 
 /// Each OLED pixel becomes a `CELL`x`CELL` block: `CELL - 1` lit, 1 gap.
@@ -21,13 +21,10 @@ pub fn sample_lines() -> Vec<String> {
     .to_vec()
 }
 
-/// Renders exactly one full scroll loop, so the GIF repeats seamlessly.
-pub fn render_gif(lines: &[String], scroll_speed: f32, refresh_ms: u64) -> Vec<u8> {
-    let delay_cs = ((refresh_ms as f32 / 10.0).round() as u16).max(2);
-    let period = LINE_SPACING * lines.len().max(1) as f32;
-    let seconds_per_frame = f32::from(delay_cs) / 100.0;
-    let frames = ((period / (scroll_speed * seconds_per_frame)).round() as usize).max(1);
-    let step = period / frames as f32;
+/// Shows up to eight pages of the animated sequence.
+pub fn render_gif(lines: &[String], page_interval_ms: u64) -> Vec<u8> {
+    const FRAME_MS: u64 = 100;
+    let pages = page_cycle_length(lines).min(8) as u64;
 
     let (width, height) = (WIDTH * CELL, HEIGHT * CELL);
     let mut out = Vec::new();
@@ -40,9 +37,9 @@ pub fn render_gif(lines: &[String], scroll_speed: f32, refresh_ms: u64) -> Vec<u
     out.extend_from_slice(b"NETSCAPE2.0");
     out.extend_from_slice(&[3, 1, 0, 0, 0]); // loop forever
 
-    for index in 0..frames {
-        let offset = normalize_scroll_offset(step * index as f32, lines.len());
-        let bits = render_frame(lines, offset);
+    let mut animation = Animation::default();
+    loop {
+        let bits = animation.render(lines, page_interval_ms);
         let mut pixels = vec![0u8; width * height];
         for y in 0..HEIGHT {
             for x in 0..WIDTH {
@@ -55,7 +52,7 @@ pub fn render_gif(lines: &[String], scroll_speed: f32, refresh_ms: u64) -> Vec<u
             }
         }
         out.extend_from_slice(&[0x21, 0xF9, 4, 0x04]);
-        out.extend_from_slice(&delay_cs.to_le_bytes());
+        out.extend_from_slice(&((FRAME_MS / 10) as u16).to_le_bytes());
         out.extend_from_slice(&[0, 0, 0x2C, 0, 0, 0, 0]);
         out.extend_from_slice(&(width as u16).to_le_bytes());
         out.extend_from_slice(&(height as u16).to_le_bytes());
@@ -65,6 +62,13 @@ pub fn render_gif(lines: &[String], scroll_speed: f32, refresh_ms: u64) -> Vec<u
             out.extend_from_slice(chunk);
         }
         out.push(0);
+        if pages == 0 {
+            break;
+        }
+        animation.advance(FRAME_MS, lines, page_interval_ms);
+        if animation.page_index >= pages && animation.phase == Phase::Hold {
+            break;
+        }
     }
     out.push(0x3B);
     out
@@ -126,11 +130,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gif_is_well_formed_and_loops_seamlessly() {
-        let gif = render_gif(&sample_lines(), 5.0, 100);
+    fn gif_is_well_formed_and_contains_animation_frames() {
+        let gif = render_gif(&sample_lines(), 5000);
         assert!(gif.starts_with(b"GIF89a"));
         assert_eq!(gif.last(), Some(&0x3B));
         assert_eq!(u16::from_le_bytes([gif[6], gif[7]]) as usize, WIDTH * CELL);
+        let control = gif
+            .windows(4)
+            .position(|bytes| bytes == [0x21, 0xF9, 4, 0x04])
+            .unwrap();
+        assert_eq!(u16::from_le_bytes([gif[control + 4], gif[control + 5]]), 10);
     }
 
     #[test]

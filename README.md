@@ -82,11 +82,11 @@ to select a different file. See [Configuration](#configuration) for the options.
 
 ### Check the display and run manually
 
-The default OLED device is `/dev/i2c-1`, at address `0x3c`. Check that the device
+The default OLED device is `/dev/i2c-0`, at address `0x3c`. Check that the device
 node exists:
 
 ```sh
-ls -l /dev/i2c-1
+ls -l /dev/i2c-0
 ```
 
 If it is missing, enable I²C for your HC4 operating system. If `i2c-dev` is
@@ -197,7 +197,7 @@ show_disks=true
 network_interface=eth0
 disk=/
 disk=/mnt/data
-i2c_device=/dev/i2c-1
+i2c_device=/dev/i2c-0
 i2c_address=0x3c
 page_interval_ms=5000
 refresh_ms=100

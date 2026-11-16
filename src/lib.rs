@@ -36,7 +36,7 @@ impl Default for Config {
             show_disks: true,
             network_interface: None,
             disks: vec![PathBuf::from("/")],
-            i2c_device: PathBuf::from("/dev/i2c-1"),
+            i2c_device: PathBuf::from("/dev/i2c-0"),
             i2c_address: 0x3c,
             scroll_speed: 5.0,
             refresh_ms: 100,
@@ -552,7 +552,7 @@ impl I2cDisplay {
 
         let mut display = Self { file };
         display.commands(&[
-            0xae, 0xd5, 0x80, 0xa8, 0x1f, 0xd3, 0x00, 0x40, 0x8d, 0x14, 0x20, 0x02, 0xa1, 0xc8,
+            0xae, 0xd5, 0x80, 0xa8, 0x1f, 0xd3, 0x00, 0x40, 0x8d, 0x14, 0x20, 0x02, 0xa0, 0xc0,
             0xda, 0x02, 0x81, 0x8f, 0xd9, 0xf1, 0xdb, 0x40, 0xa4, 0xa6, 0xaf,
         ])?;
         Ok(display)
@@ -596,6 +596,7 @@ mod tests {
         );
         assert_eq!(config.scroll_speed, 8.5);
         assert_eq!(config.page_interval_ms, 7000);
+        assert_eq!(config.i2c_device, PathBuf::from("/dev/i2c-0"));
         assert_eq!(config.i2c_address, 0x3d);
     }
 
